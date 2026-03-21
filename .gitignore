@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+venv/
+.env
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# HuggingFace cache (CRITICAL)
+.cache/
+~/.cache/
+
+# Docker
+*.tar
+
+# IDE
+.vscode/
+.idea/
