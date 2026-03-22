@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 import os
+import json
 
 API_KEY = os.getenv("TRANSLATION_API_KEY")
 
@@ -18,8 +19,6 @@ app.add_middleware(
 )
 
 
-# ---------------- SCHEMAS ----------------
-
 class TranslateRequest(BaseModel):
     text: str
 
@@ -27,8 +26,6 @@ class TranslateRequest(BaseModel):
 class BatchRequest(BaseModel):
     items: list[TranslateRequest]
 
-
-# ---------------- ROUTES ----------------
 
 @app.get("/health")
 def health():
@@ -40,18 +37,27 @@ def translate(req: TranslateRequest, x_api_key: str = Header(None)):
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    if not req.text.strip():
-        return {"translated": req.text}
+    text = req.text if isinstance(req.text, str) else ""
+
+    if not text.strip():
+        return {"translated": text}
 
     try:
         response = requests.post(
             HF_API_URL,
-            json={"data": [[req.text]]},  # batch format
+            json={
+                "data": [text],
+                "fn_index": 0
+            },
             timeout=60,
         )
 
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail="Upstream error")
+
         result = response.json()
-        translated = result["data"][0][0]
+
+        translated = result["data"][0]
 
         return {"translated": translated}
 
@@ -64,7 +70,10 @@ def translate_batch(req: BatchRequest, x_api_key: str = Header(None)):
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    texts = [item.text for item in req.items if item.text.strip()]
+    texts = [
+        item.text for item in req.items
+        if isinstance(item.text, str)
+    ]
 
     if not texts:
         return {"translations": []}
@@ -72,11 +81,18 @@ def translate_batch(req: BatchRequest, x_api_key: str = Header(None)):
     try:
         response = requests.post(
             HF_API_URL,
-            json={"data": [texts]},  # true batch
+            json={
+                "data": [json.dumps(texts)],
+                "fn_index": 1
+            },
             timeout=60,
         )
 
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail="Upstream error")
+
         result = response.json()
+
         translations = result["data"][0]
 
         return {"translations": translations}
