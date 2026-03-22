@@ -4,9 +4,9 @@ from pydantic import BaseModel
 import requests
 import os
 import json
+import time
 
 API_KEY = os.getenv("TRANSLATION_API_KEY")
-
 HF_API_URL = "https://vinjex-translation-ml.hf.space/run/predict"
 
 app = FastAPI(title="Translation Service")
@@ -27,9 +27,21 @@ class BatchRequest(BaseModel):
     items: list[TranslateRequest]
 
 
+def call_hf(payload, retries=3):
+    for i in range(retries):
+        try:
+            r = requests.post(HF_API_URL, json=payload, timeout=60)
+            if r.status_code == 200:
+                return r.json()
+        except:
+            pass
+        time.sleep(2 ** i)
+    raise HTTPException(status_code=502, detail="HF Space unavailable")
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "provider": "huggingface-space"}
+    return {"status": "ok"}
 
 
 @app.post("/translate")
@@ -42,27 +54,12 @@ def translate(req: TranslateRequest, x_api_key: str = Header(None)):
     if not text.strip():
         return {"translated": text}
 
-    try:
-        response = requests.post(
-            HF_API_URL,
-            json={
-                "data": [text],
-                "fn_index": 0
-            },
-            timeout=60,
-        )
+    result = call_hf({
+        "data": [text],
+        "fn_index": 0
+    })
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=502, detail="Upstream error")
-
-        result = response.json()
-
-        translated = result["data"][0]
-
-        return {"translated": translated}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"translated": result["data"][0]}
 
 
 @app.post("/translate/batch")
@@ -70,32 +67,14 @@ def translate_batch(req: BatchRequest, x_api_key: str = Header(None)):
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    texts = [
-        item.text for item in req.items
-        if isinstance(item.text, str)
-    ]
+    texts = [i.text for i in req.items if isinstance(i.text, str)]
 
     if not texts:
         return {"translations": []}
 
-    try:
-        response = requests.post(
-            HF_API_URL,
-            json={
-                "data": [json.dumps(texts)],
-                "fn_index": 1
-            },
-            timeout=60,
-        )
+    result = call_hf({
+        "data": [json.dumps(texts)],
+        "fn_index": 1
+    })
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=502, detail="Upstream error")
-
-        result = response.json()
-
-        translations = result["data"][0]
-
-        return {"translations": translations}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"translations": result["data"][0]}
