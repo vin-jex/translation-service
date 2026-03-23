@@ -6,8 +6,15 @@ import os
 import json
 import time
 
+# -------- CONFIG --------
+
 API_KEY = os.getenv("TRANSLATION_API_KEY", "")
 HF_SPACE_URL = os.getenv("HF_SPACE_URL", "https://vinjex-translation-ml.hf.space")
+
+TIMEOUT_POST = 60
+TIMEOUT_STREAM = 120
+
+# -------- APP INIT --------
 
 app = FastAPI(title="LearnSci Translation Proxy")
 
@@ -18,59 +25,115 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -------- SCHEMAS --------
 
 class TranslateRequest(BaseModel):
     text: str
-    src_lang: str = "eng_Latn"
-    tgt_lang: str = "ibo_Latn"
 
+class BatchItem(BaseModel):
+    text: str
 
 class BatchRequest(BaseModel):
-    items: list[TranslateRequest]
+    items: list[BatchItem]
 
+class TeachRequest(BaseModel):
+    bad: str
+    good: str
 
-def call_space(fn_index: int, data: list, retries: int = 3) -> dict:
-    url = f"{HF_SPACE_URL}/run/predict"
-    payload = {"fn_index": fn_index, "data": data}
-    for i in range(retries):
+# -------- CORE: CALL HF SPACE --------
+
+def call_space(api_name: str, data: list, retries: int = 3):
+    post_url = f"{HF_SPACE_URL}/gradio_api/call/{api_name}"
+
+    for attempt in range(retries):
         try:
-            r = requests.post(url, json=payload, timeout=120)
-            if r.status_code == 200:
-                return r.json()
-            print(f"Space returned {r.status_code}: {r.text}")
+            # STEP 1: submit job
+            r = requests.post(
+                post_url,
+                json={"data": data},
+                timeout=TIMEOUT_POST
+            )
+            r.raise_for_status()
+
+            event_id = r.json().get("event_id")
+            if not event_id:
+                raise Exception("No event_id returned")
+
+            # STEP 2: stream result
+            result_url = f"{post_url}/{event_id}"
+
+            with requests.get(result_url, stream=True, timeout=TIMEOUT_STREAM) as res:
+                res.raise_for_status()
+
+                for line in res.iter_lines():
+                    if not line:
+                        continue
+
+                    decoded = line.decode()
+
+                    if decoded.startswith("data:"):
+                        payload = decoded.replace("data:", "").strip()
+                        return json.loads(payload)
+
         except Exception as e:
-            print(f"Attempt {i+1} failed: {e}")
-        time.sleep(2 ** i)
+            print(f"[Attempt {attempt+1}] Error: {e}")
+            time.sleep(2 ** attempt)
+
     raise HTTPException(status_code=502, detail="HF Space unavailable")
 
+# -------- ROUTES --------
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "space": HF_SPACE_URL}
-
+    return {
+        "status": "ok",
+        "space": HF_SPACE_URL
+    }
 
 @app.post("/translate")
 def translate(req: TranslateRequest, x_api_key: str = Header(None)):
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    if not req.text.strip():
-        return {"translated": req.text}
 
-    # fn_index 0 = translate_single
-    result = call_space(0, [req.text, req.src_lang, req.tgt_lang])
-    return {"translated": result["data"][0]}
+    text = req.text.strip()
+    if not text:
+        return {"translated": ""}
 
+    result = call_space("translate", [text])
+
+    return {
+        "translated": result[0] if isinstance(result, list) else result
+    }
 
 @app.post("/translate/batch")
 def translate_batch(req: BatchRequest, x_api_key: str = Header(None)):
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    texts = [i.text for i in req.items]
+    texts = [item.text for item in req.items if item.text.strip()]
+
     if not texts:
         return {"translations": []}
 
-    # fn_index 1 = translate_batch
-    result = call_space(1, [json.dumps(texts)])
-    translations = json.loads(result["data"][0])
-    return {"translations": translations}
+    # NOTE: your Gradio app expects JSON string input
+    payload = json.dumps(texts)
+
+    result = call_space("translate_batch", [payload])
+
+    return {
+        "translations": result if isinstance(result, list) else []
+    }
+
+@app.post("/teach")
+def teach(req: TeachRequest, x_api_key: str = Header(None)):
+    if API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not req.bad.strip() or not req.good.strip():
+        raise HTTPException(status_code=400, detail="Invalid input")
+
+    result = call_space("teach", [req.bad, req.good])
+
+    return {
+        "status": result[0] if isinstance(result, list) else "ok"
+    }
